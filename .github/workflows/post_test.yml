@@ -1,0 +1,60 @@
+name: Instagram 2-Slide Post Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_now:
+        description: 'Publish new AI post on Instagram?'
+        required: true
+        type: choice
+        default: 'no'
+        options:
+          - 'no'
+          - 'yes'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: instagram-publisher
+  cancel-in-progress: false
+
+jobs:
+  create-and-possibly-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install required tools
+        run: pip install -r requirements.txt
+      - name: Create two Simple English images
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python bot.py
+      - name: Host two images publicly in this GitHub repository
+        shell: bash
+        run: |
+          folder="posts/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$folder"
+          cp output/slide_1.jpg "$folder/slide_1.jpg"
+          cp output/slide_2.jpg "$folder/slide_2.jpg"
+          git add "$folder"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Add Instagram test slides for run ${GITHUB_RUN_ID}"
+          git push
+      - name: Keep a downloadable preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: instagram-preview
+          path: output/
+          retention-days: 7
+      - name: Publish ONLY when user chooses YES
+        if: ${{ inputs.publish_now == 'yes' }}
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          PUBLIC_BASE: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/posts/${{ github.run_id }}-${{ github.run_attempt }}
+        run: python publish_ig.py
