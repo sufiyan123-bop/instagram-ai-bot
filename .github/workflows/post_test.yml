@@ -4,35 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       publish_now:
-        description: 'Publish a real Instagram carousel? (no = preview only)'
+        description: 'Publish a real Instagram carousel?'
         required: true
         type: choice
         default: 'no'
-        options: ['no', 'yes']
+        options:
+          - 'no'
+          - 'yes'
 
-  # Exactly 50 target slots: 07:11 to 21:53 IST, every 18 minutes.
-  # Schedule triggers may be delayed or dropped by GitHub Actions.
+  # 50 daily posting slots in IST.
+  # Cron uses UTC (IST = UTC + 5:30).
+  # Target: 07:11 AM to 09:53 PM IST.
   schedule:
-    - cron: '11,29,47 7,10,13,16,19 * * *'
-      timezone: 'Asia/Kolkata'
-    - cron: '5,23,41,59 8,11,14,17,20 * * *'
-      timezone: 'Asia/Kolkata'
-    - cron: '17,35,53 9,12,15,18,21 * * *'
-      timezone: 'Asia/Kolkata'
+    - cron: '41,59 1,4,7,10,13 * * *'
+    - cron: '17,35,53 2,5,8,11,14 * * *'
+    - cron: '5,23,41,59 3,6,9,12,15 * * *'
+    - cron: '47 1,4,7,10,13 * * *'
 
 permissions:
   contents: write
 
-# Prevent overlapping publications by this workflow.
 concurrency:
   group: instagram-publisher
   cancel-in-progress: false
 
 jobs:
   create-and-publish:
-    # Pause 50/day until previews, Meta quota, and image rights are verified.
-    # To enable, ask to update this workflow safely after checks.
     if: ${{ github.event_name == 'workflow_dispatch' || vars.ENABLE_50_POSTS == 'true' }}
+
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -50,7 +49,7 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Verify Instagram quota before spending Gemini calls
+      - name: Verify Instagram quota
         id: quota_before
         if: ${{ github.event_name == 'schedule' || inputs.publish_now == 'yes' }}
         env:
@@ -58,47 +57,53 @@ jobs:
           CHECK_SCHEDULE_HOURS: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: python check_quota.py
 
-      - name: Generate two 1080x1080 Hindi-English slides
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
+      - name: Generate two Instagram slides
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_now == 'no') || steps.quota_before.outputs.allowed == 'true' }}
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python bot.py
 
-      - name: Save preview artifact (also for real posts)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
+      - name: Save preview images
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_now == 'no') || steps.quota_before.outputs.allowed == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: instagram-preview
           path: output/
           retention-days: 2
 
-      # Preview-only runs never commit images publicly and never call Instagram.
-      - name: Host real-post images in public repository
+      - name: Host images in GitHub
         if: ${{ steps.quota_before.outputs.allowed == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
+
           folder="posts/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$folder"
+
           cp output/slide_1.jpg "$folder/slide_1.jpg"
           cp output/slide_2.jpg "$folder/slide_2.jpg"
+
           git add "$folder"
+
           git -c user.name='github-actions[bot]' \
               -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
               commit -m "Add Instagram slides ${GITHUB_RUN_ID}"
-          # Pull before pushing in case another commit updated main in the meantime.
+
           for attempt in 1 2 3; do
             git pull --rebase origin "$GITHUB_REF_NAME"
+
             if git push origin "HEAD:$GITHUB_REF_NAME"; then
               echo "Public image commit ready"
               exit 0
             fi
+
             sleep 3
           done
-          echo "Could not push images after 3 attempts" >&2
+
+          echo "Could not push images" >&2
           exit 1
 
-      - name: Recheck rolling quota immediately before publishing
+      - name: Recheck Instagram quota
         id: quota_final
         if: ${{ steps.quota_before.outputs.allowed == 'true' }}
         env:
@@ -106,7 +111,7 @@ jobs:
           CHECK_SCHEDULE_HOURS: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: python check_quota.py
 
-      - name: Publish two-image Instagram carousel
+      - name: Publish Instagram carousel
         if: ${{ steps.quota_final.outputs.allowed == 'true' }}
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
