@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   create-and-publish:
-    if: ${{ github.event_name == 'workflow_dispatch' || vars.ENABLE_50_POSTS == 'true' }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
 
     runs-on: ubuntu-latest
     timeout-minutes: 15
