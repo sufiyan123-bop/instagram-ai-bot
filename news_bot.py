@@ -1,43 +1,56 @@
 import json
 import random
 import hashlib
+import re
+import html
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import quote
 
 import requests
 
 
-# FACTZAI NEWS BOT
-# Fetch latest news from the past 24 hours
+# ==========================================
+# FACTZAI NEWS COLLECTOR
+# ==========================================
 
 NEWS_FILE = Path("latest_news.json")
 HISTORY_FILE = Path("posted_news.json")
 
-SEARCHES = [
-    "India breaking news",
-    "World breaking news",
-    "Politics news",
-    "Technology AI news",
-    "Science space news",
-    "Business economy news",
-    "Sports news",
-    "Bollywood Hollywood news",
-    "Entertainment celebrity news",
-    "Health medical news",
-    "Education news",
-    "Crime cybersecurity news",
-    "Environment climate news",
-    "Adult entertainment industry business news",
-]
+MAX_NEWS_AGE_HOURS = 24
+
+CATEGORIES = {
+    "India": "India latest news",
+    "World": "world international news",
+    "Politics": "politics government elections news",
+    "Technology": "technology artificial intelligence news",
+    "Science": "science research discoveries news",
+    "Space": "space NASA ISRO news",
+    "Business": "business economy markets news",
+    "Sports": "sports cricket football news",
+    "Entertainment": "Bollywood Hollywood entertainment news",
+    "Health": "health medical research news",
+    "Education": "education students exams news",
+    "Cybersecurity": "cybersecurity data breach news",
+    "Environment": "environment climate news",
+    "Adult Industry": "adult entertainment industry business regulation news",
+}
 
 
-def get_news_id(title):
-    clean = title.strip().lower()
+def normalize_title(title):
+    title = html.unescape(title)
+    title = re.sub(r"\s+", " ", title)
+    return title.strip().lower()
+
+
+def make_news_id(title):
+    normalized = normalize_title(title)
+
     return hashlib.sha256(
-        clean.encode("utf-8")
+        normalized.encode("utf-8")
     ).hexdigest()
 
 
@@ -49,27 +62,50 @@ def load_history():
         data = json.loads(
             HISTORY_FILE.read_text(encoding="utf-8")
         )
-        return set(data)
-    except (ValueError, OSError):
-        return set()
+
+        if isinstance(data, list):
+            return set(str(item) for item in data)
+
+        if isinstance(data, dict):
+            return set(data.keys())
+
+    except (OSError, ValueError):
+        pass
+
+    return set()
 
 
-def fetch_news(query):
-    url = "https://news.google.com/rss/search"
+def parse_publication_date(date_text):
+    try:
+        published = parsedate_to_datetime(date_text)
 
-    params = {
-        "q": f"{query} when:1d",
-        "hl": "en-IN",
-        "gl": "IN",
-        "ceid": "IN:en",
-    }
+        if published.tzinfo is None:
+            published = published.replace(
+                tzinfo=timezone.utc
+            )
+
+        return published.astimezone(timezone.utc)
+
+    except (ValueError, TypeError, IndexError):
+        return None
+
+
+def fetch_category_news(category, search_query):
+    encoded_query = quote(
+        f"{search_query} when:1d"
+    )
+
+    url = (
+        "https://news.google.com/rss/search"
+        f"?q={encoded_query}"
+        "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
 
     response = requests.get(
         url,
-        params=params,
-        timeout=25,
+        timeout=30,
         headers={
-            "User-Agent": "Mozilla/5.0 FACTZAI-NewsBot/1.0"
+            "User-Agent": "Mozilla/5.0"
         },
     )
 
@@ -77,85 +113,145 @@ def fetch_news(query):
 
     root = ET.fromstring(response.content)
 
-    results = []
+    now = datetime.now(timezone.utc)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        hours=24
+    cutoff = now - timedelta(
+        hours=MAX_NEWS_AGE_HOURS
     )
 
-    for item in root.findall(".//item"):
-        title = item.findtext("title", "").strip()
-        link = item.findtext("link", "").strip()
-        pub_date = item.findtext("pubDate", "").strip()
+    results = []
 
-        if not title or not link or not pub_date:
+    for item in root.findall(".//channel/item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        date_text = (
+            item.findtext("pubDate") or ""
+        ).strip()
+
+        source_element = item.find("source")
+
+        source_name = ""
+
+        if source_element is not None:
+            source_name = (
+                source_element.text or ""
+            ).strip()
+
+        if not title or not link or not date_text:
             continue
 
-        try:
-            published = parsedate_to_datetime(pub_date)
+        published = parse_publication_date(
+            date_text
+        )
 
-            if published.tzinfo is None:
-                published = published.replace(
-                    tzinfo=timezone.utc
-                )
-
-            if published < cutoff:
-                continue
-
-            if published > datetime.now(timezone.utc):
-                continue
-
-        except (ValueError, TypeError):
+        if published is None:
             continue
 
-        news_id = get_news_id(title)
+        if published < cutoff or published > now:
+            continue
+
+        clean_title = html.unescape(title)
+
+        if source_name:
+            suffix = f" - {source_name}"
+
+            if clean_title.endswith(suffix):
+                clean_title = clean_title[
+                    :-len(suffix)
+                ].strip()
+
+        if len(clean_title) < 20:
+            continue
+
+        news_id = make_news_id(clean_title)
 
         results.append({
             "id": news_id,
-            "title": title,
+            "title": clean_title,
+            "source": source_name or "Google News",
             "url": link,
-            "published": published.isoformat(),
-            "category": query,
+            "published_utc": published.isoformat(),
+            "category": category,
+            "collected_utc": now.isoformat(),
         })
 
     return results
 
 
-def main():
+def collect_fresh_news():
     history = load_history()
-    available = []
-    seen = set()
 
-    for query in SEARCHES:
+    collected = []
+    seen_ids = set()
+
+    for category, query in CATEGORIES.items():
+        print(f"Checking category: {category}")
+
         try:
-            news_list = fetch_news(query)
-
-            for news in news_list:
-                news_id = news["id"]
-
-                if news_id in history:
-                    continue
-
-                if news_id in seen:
-                    continue
-
-                seen.add(news_id)
-                available.append(news)
+            stories = fetch_category_news(
+                category,
+                query
+            )
 
         except Exception as error:
             print(
-                "News fetch failed:",
-                query,
-                type(error).__name__,
+                f"Failed {category}: "
+                f"{type(error).__name__}: {error}"
             )
+            continue
 
-    if not available:
-        print("No fresh news available.")
-        return
+        for story in stories:
+            news_id = story["id"]
 
-    random.shuffle(available)
+            if news_id in history:
+                continue
 
-    selected = available[0]
+            if news_id in seen_ids:
+                continue
+
+            seen_ids.add(news_id)
+            collected.append(story)
+
+    return collected
+
+
+def choose_news(stories):
+    if not stories:
+        return None
+
+    # Prioritize newer stories without always
+    # selecting the exact newest headline.
+
+    stories.sort(
+        key=lambda item: item["published_utc"],
+        reverse=True,
+    )
+
+    top_stories = stories[:30]
+
+    return random.choice(top_stories)
+
+
+def main():
+    print("=" * 45)
+    print("FACTZAI - LATEST NEWS COLLECTOR")
+    print("=" * 45)
+
+    stories = collect_fresh_news()
+
+    print(f"Fresh stories found: {len(stories)}")
+
+    selected = choose_news(stories)
+
+    if selected is None:
+        # Prevent downstream steps from using
+        # a stale result from a previous run.
+        NEWS_FILE.unlink(missing_ok=True)
+
+        print(
+            "No suitable fresh news available."
+        )
+        raise SystemExit(1)
 
     NEWS_FILE.write_text(
         json.dumps(
@@ -166,13 +262,14 @@ def main():
         encoding="utf-8",
     )
 
-    print("FACTZAI NEWS SELECTED")
+    print("\nSELECTED NEWS")
     print("Title:", selected["title"])
-    print("Published:", selected["published"])
     print("Category:", selected["category"])
-    print("Source:", selected["url"])
+    print("Source:", selected["source"])
+    print("Published:", selected["published_utc"])
+    print("URL:", selected["url"])
 
-    print("News saved to latest_news.json")
+    print("\nSaved: latest_news.json")
 
 
 if __name__ == "__main__":
