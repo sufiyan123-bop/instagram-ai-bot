@@ -1,925 +1,623 @@
+"""FACTZAI news carousel. Reads latest_news.json; never uses fixed facts."""
 
-"""Generate two Hindi-English Instagram carousel slides.
-
-Outputs:
-    output/slide_1.jpg
-    output/slide_2.jpg
-    output/caption.txt
-
-Photos come from Wikipedia/Wikimedia, not image-generation AI.
-Check photo licenses and factual accuracy before automated publication.
-"""
-
-from __future__ import annotations
-
-import io
 import json
 import os
-import random
 import re
 import subprocess
 import tempfile
-import time
-from pathlib import Path
-from urllib.parse import quote
 
-import requests
-from PIL import (
-    Image,
-    ImageDraw,
-    ImageEnhance,
-    ImageFont,
-    ImageOps,
-    features,
-)
+from pathlib import Path
+from datetime import datetime
+
+from PIL import Image, ImageDraw, ImageFont, features
 from google import genai
 from google.genai import types
 
 
 ROOT = Path(__file__).resolve().parent
-OUTPUT = ROOT / "output"
+OUT = ROOT / "output"
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
-BRAND = os.getenv("BRAND_NAME", "FACT DAILY")[:20].upper()
+BRAND = "FACTZAI"
 
-SIDE = 1080
-Y_PANEL = 565
+NAVY = (8, 14, 28)
+YELLOW = (255, 214, 49)
+WHITE = (245, 247, 252)
+MUTED = (168, 181, 205)
 
-MAX_CONTENT_ATTEMPTS = 5
-MAX_SOURCE_ATTEMPTS = 3
+SIZE = 1080
 
-TOPICS = [
-    "Octopus",
-    "Honey bee",
-    "Venus",
-    "Jupiter",
-    "Saturn",
-    "Mars",
-    "Great Barrier Reef",
-    "Antarctica",
-    "Hummingbird",
-    "Koala",
-    "Blue whale",
-    "Giant panda",
-    "Lightning",
-    "Solar eclipse",
-    "Aurora",
-    "Volcano",
-    "Giraffe",
-    "Dolphin",
-    "Penguin",
-    "Red panda",
-    "Elephant",
-    "Chameleon",
-    "Axolotl",
-    "Coral reef",
-    "Baobab",
-    "Mount Everest",
-    "Moon",
-    "Neptune",
-    "Red fox",
-    "Owl",
-]
 
-HTTP = requests.Session()
-HTTP.headers.update({
-    "User-Agent": (
-        "FactDailyInstagramBot/3.0 "
-        "(educational project; "
-        "https://github.com/sufiyan123-bop/instagram-ai-bot)"
-    )
-})
+# ==========================================
+# FONTS
+# ==========================================
 
-
-def get_verified_source(excluded=None):
-    """Find a Wikipedia article with text and a usable photo."""
-
-    excluded = excluded or set()
-    topics = [t for t in TOPICS if t not in excluded]
-    random.shuffle(topics)
-
-    for name in topics:
-        endpoint = (
-            "https://en.wikipedia.org/api/rest_v1/page/summary/"
-            + quote(name.replace(" ", "_"))
-        )
-
-        try:
-            response = HTTP.get(
-                endpoint,
-                timeout=20,
-                headers={"Accept": "application/json"},
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            extract = (data.get("extract") or "").strip()
-
-            photos = []
-            for kind in ("originalimage", "thumbnail"):
-                url = (data.get(kind) or {}).get("source", "")
-
-                if url.lower().split("?")[0].endswith(
-                    (".jpg", ".jpeg", ".png", ".webp")
-                ):
-                    if url not in photos:
-                        photos.append(url)
-
-            if (
-                len(extract) < 180
-                or data.get("type") == "disambiguation"
-                or not photos
-            ):
-                continue
-
-            source = (
-                data.get("content_urls", {})
-                .get("desktop", {})
-                .get("page", endpoint)
-            )
-
-            return (
-                data.get("title", name),
-                extract[:2600],
-                source,
-                photos,
-                name,
-            )
-
-        except (requests.RequestException, ValueError, KeyError):
-            continue
-
-    raise RuntimeError("No suitable Wikipedia article found.")
-
-
-def has_hindi_and_english(text):
-    return (
-        bool(re.search(r"[\u0900-\u097f]", text))
-        and bool(re.search(r"[A-Za-z]", text))
-    )
-
-
-def normalize_text(value):
-    """Remove formatting that should not appear on slides."""
-
-    if not isinstance(value, str):
-        return ""
-
-    value = re.sub(r"\s+", " ", value).strip()
-    value = value.strip("`\"' ")
-
-    return value
-
-
-def validate_copy(data):
-    """Validate AI copy without cutting sentences mid-word."""
-
-    if not isinstance(data, dict):
-        raise ValueError("Gemini response is not a JSON object.")
-
-    limits = {
-        "hook": (10, 48),
-        "fact": (15, 85),
-        "explanation": (30, 130),
-        "caption": (20, 200),
-    }
-
-    clean = {}
-
-    for field, (minimum, maximum) in limits.items():
-        value = normalize_text(data.get(field))
-
-        if len(value) < minimum:
-            raise ValueError(
-                f"{field} too short: {len(value)} characters"
-            )
-
-        if len(value) > maximum:
-            raise ValueError(
-                f"{field} too long: {len(value)} characters"
-            )
-
-        clean[field] = value
-
-    for field in ("fact", "explanation"):
-        if not has_hindi_and_english(clean[field]):
-            raise ValueError(
-                f"{field} must contain Hindi and English"
-            )
-
-    return clean
-
-
-def generate_mixed_copy(title, extract, source, client):
-    """Retry Gemini when it ignores character limits."""
-
-    prompt = f"""
-Create accurate educational Instagram carousel copy.
-
-Use ONLY facts supported by the Wikipedia excerpt below.
-Do not invent facts, numbers, or scientific claims.
-
-Language:
-- Natural Hindi in Devanagari mixed with English words.
-- Both fact and explanation MUST contain Hindi and English.
-- Do not use only Roman Hinglish.
-- No emojis, hashtags, URLs, or markdown inside JSON values.
-
-Return ONLY a JSON object containing exactly:
-hook, fact, explanation, caption
-
-STRICT CHARACTER LIMITS INCLUDING SPACES:
-hook: 12 to 36 characters
-fact: 20 to 75 characters
-explanation: 45 to 105 characters
-caption: 25 to 150 characters
-
-Make sentences complete and concise.
-Keep the explanation especially short.
-Do not repeat the fact in the explanation.
-
-Topic: {title}
-Wikipedia source: {source}
-Wikipedia excerpt: {extract}
-"""
-
-    last_error = None
-
-    for attempt in range(1, MAX_CONTENT_ATTEMPTS + 1):
-        print(
-            f"Gemini generation attempt "
-            f"{attempt}/{MAX_CONTENT_ATTEMPTS}"
-        )
-
-        try:
-            result = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    response_mime_type="application/json",
-                ),
-            )
-
-            if not result.text:
-                raise ValueError("Gemini returned empty content.")
-
-            data = json.loads(result.text)
-            clean = validate_copy(data)
-
-            print("Gemini content validated successfully.")
-            return clean
-
-        except (
-            ValueError,
-            TypeError,
-            KeyError,
-        ) as exc:
-            last_error = exc
-            print(
-                "Content validation failed:",
-                str(exc)[:180],
-            )
-
-            # Tell Gemini exactly why the previous output failed.
-            prompt += (
-                "\nIMPORTANT CORRECTION: Your previous output "
-                f"was rejected because: {str(exc)[:150]}. "
-                "Return NEW, SHORTER, COMPLETE sentences "
-                "within ALL character limits.\n"
-            )
-
-        except Exception as exc:
-            last_error = exc
-            print(
-                "Gemini request failed:",
-                type(exc).__name__,
-            )
-
-        if attempt < MAX_CONTENT_ATTEMPTS:
-            time.sleep(min(2 * attempt, 8))
-
-    raise RuntimeError(
-        "Gemini could not generate valid content "
-        f"after {MAX_CONTENT_ATTEMPTS} attempts. "
-        f"Last error: {type(last_error).__name__}"
-    )
-
-
-def download_photo(urls):
-    """Download a real photo, trying alternate sizes."""
-
-    for url in urls:
-        try:
-            with HTTP.get(
-                url,
-                timeout=45,
-                stream=True,
-            ) as response:
-
-                response.raise_for_status()
-
-                raw = bytearray()
-
-                for chunk in response.iter_content(65536):
-                    raw.extend(chunk)
-
-                    if len(raw) > 22 * 1024 * 1024:
-                        raise ValueError("Image too large.")
-
-            with Image.open(io.BytesIO(raw)) as image:
-                image.load()
-
-                if image.width < 300 or image.height < 260:
-                    raise ValueError("Image too small.")
-
-                photo = ImageOps.exif_transpose(image)
-                return photo.convert("RGB"), url
-
-        except (
-            requests.RequestException,
-            ValueError,
-            OSError,
-        ) as exc:
-            print(
-                "Skipping photo:",
-                type(exc).__name__,
-            )
-
-    raise RuntimeError("No usable Wikipedia photo found.")
-
-
-def load_font(size, bold=False, script="hi"):
-    """Load fonts for Hindi and English."""
-
-    if script == "en":
-        path = (
-            "/usr/share/fonts/truetype/dejavu/"
-            + (
-                "DejaVuSans-Bold.ttf"
-                if bold
-                else "DejaVuSans.ttf"
-            )
-        )
-        return ImageFont.truetype(path, size)
+def font(size, bold=False):
 
     if not features.check("raqm"):
         raise RuntimeError(
-            "Pillow libraqm required for Hindi text."
+            "Pillow needs libraqm to render Hindi correctly"
         )
 
-    candidates = [
-        (
-            "/usr/share/fonts/truetype/noto/"
-            + (
-                "NotoSansDevanagari-Bold.ttf"
-                if bold
-                else "NotoSansDevanagari-Regular.ttf"
-            )
-        ),
-        (
-            "/usr/share/fonts/truetype/noto/"
-            + (
-                "NotoSansDevanagariUI-Bold.ttf"
-                if bold
-                else "NotoSansDevanagariUI-Regular.ttf"
-            )
-        ),
+    paths = [
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-%s.ttf"
+        % ("Bold" if bold else "Regular"),
+
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-%s.ttf"
+        % ("Bold" if bold else "Regular"),
     ]
 
-    path = next(
-        (Path(p) for p in candidates if Path(p).is_file()),
-        None,
-    )
-
-    if path is None:
-        try:
-            matched = subprocess.check_output(
-                [
-                    "fc-match",
-                    "-f",
-                    "%{file}",
-                    "Noto Sans Devanagari",
-                ],
-                text=True,
-                timeout=5,
-            ).strip()
-
-            if (
-                "Devanagari" in matched
-                and Path(matched).is_file()
-            ):
-                path = Path(matched)
-
-        except (OSError, subprocess.SubprocessError):
-            pass
-
-    if path is None:
-        path = (
-            Path(tempfile.gettempdir())
-            / "autopost_noto_devanagari.ttf"
-        )
-
-        if not path.is_file():
-            font_url = (
-                "https://raw.githubusercontent.com/"
-                "google/fonts/main/ofl/"
-                "notosansdevanagari/"
-                "NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf"
-            )
-
-            response = HTTP.get(font_url, timeout=35)
-            response.raise_for_status()
-            path.write_bytes(response.content)
-
-    font = ImageFont.truetype(
-        str(path),
-        size,
-        layout_engine=ImageFont.Layout.RAQM,
-    )
+    for p in paths:
+        if Path(p).is_file():
+            return ImageFont.truetype(p, size)
 
     try:
-        axes = font.get_variation_axes()
+        p = subprocess.check_output(
+            [
+                "fc-match",
+                "-f",
+                "%{file}",
+                "Noto Sans Devanagari",
+            ],
+            text=True,
+            timeout=5,
+        ).strip()
 
-        if axes:
-            coordinates = []
+        if "Devanagari" in p and Path(p).is_file():
+            return ImageFont.truetype(p, size)
 
-            for axis in axes:
-                axis_name = axis["name"]
-
-                if isinstance(axis_name, bytes):
-                    axis_name = axis_name.decode()
-
-                if "Weight" in axis_name:
-                    coordinates.append(
-                        800 if bold else 500
-                    )
-                else:
-                    coordinates.append(axis["default"])
-
-            font.set_variation_by_axes(coordinates)
-
-    except (OSError, AttributeError, ValueError):
+    except Exception:
         pass
 
-    return font
+    import requests
+
+    target = (
+        Path(tempfile.gettempdir())
+        / "factzai_noto.ttf"
+    )
+
+    if not target.is_file():
+
+        url = (
+            "https://raw.githubusercontent.com/"
+            "google/fonts/main/ofl/"
+            "notosansdevanagari/"
+            "NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf"
+        )
+
+        r = requests.get(url, timeout=35)
+        r.raise_for_status()
+
+        target.write_bytes(r.content)
+
+    return ImageFont.truetype(
+        str(target),
+        size,
+    )
 
 
-def center_fit(
+# ==========================================
+# TEXT HELPERS
+# ==========================================
+
+def clean(s):
+
+    return re.sub(
+        r"\s+",
+        " ",
+        str(s or ""),
+    ).strip()
+
+
+# ==========================================
+# GEMINI NEWS WRITING
+# ==========================================
+
+def ai_copy(story):
+
+    key = os.getenv("GEMINI_API_KEY")
+
+    if not key:
+        raise RuntimeError(
+            "GEMINI_API_KEY secret missing"
+        )
+
+    prompt = f"""
+You are a cautious Hindi/Hinglish news editor.
+
+Only the following RSS metadata is known,
+NOT the full article.
+
+Headline: {story['title']}
+Source: {story['source']}
+Category: {story['category']}
+Published UTC: {story['published_utc']}
+
+Do not invent quotes, numbers, details,
+consequences, or claims not directly
+supported by the headline.
+
+Write in Devanagari Hindi mixed with
+English words, simple and neutral.
+
+If headline is uncertain,
+preserve that uncertainty.
+
+Return ONLY JSON with strings:
+
+headline (40-105 chars)
+point1 (35-105 chars)
+point2 (35-105 chars)
+caption (60-230 chars)
+
+point1 should rephrase the confirmed headline.
+
+point2 should state that more details
+require the original report.
+
+Do not fabricate why it matters.
+
+Do not include hashtags, URLs,
+emojis, or Markdown.
+
+No explicit sexual content.
+"""
+
+    client = genai.Client(
+        api_key=key
+    )
+
+    model = os.getenv(
+        "GEMINI_MODEL",
+        "gemini-3.5-flash-lite",
+    )
+
+    for attempt in range(3):
+
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.15,
+            ),
+        )
+
+        data = json.loads(
+            response.text or "{}"
+        )
+
+        limits = {
+            "headline": (20, 130),
+            "point1": (20, 135),
+            "point2": (20, 135),
+            "caption": (35, 260),
+        }
+
+        data = {
+            k: clean(data.get(k))
+            for k in limits
+        }
+
+        valid_lengths = all(
+            lo <= len(data[k]) <= hi
+            for k, (lo, hi) in limits.items()
+        )
+
+        has_hindi = any(
+            "\u0900" <= c <= "\u097f"
+            for c in data["headline"]
+        )
+
+        if valid_lengths and has_hindi:
+            return data
+
+        prompt += """
+Your previous output was too long,
+too short, or not Hindi.
+
+Follow limits exactly.
+"""
+
+    raise RuntimeError(
+        "Gemini did not produce valid Hindi "
+        "news copy; refusing to publish"
+    )
+
+
+# ==========================================
+# TEXT WRAPPING
+# ==========================================
+
+def wrapped(
     draw,
     text,
-    y1,
-    y2,
-    width,
-    size_start,
-    color,
-    max_lines,
-    bold=True,
-    highlight=False,
+    face,
+    max_width,
 ):
-    """Fit mixed Hindi-English text into a slide panel."""
 
-    for size in range(size_start, 21, -2):
-        hindi_font = load_font(
+    lines = []
+    current = ""
+
+    for word in clean(text).split(" "):
+
+        candidate = (
+            current + " " + word
+        ).strip()
+
+        width = draw.textbbox(
+            (0, 0),
+            candidate,
+            font=face,
+        )[2]
+
+        if width <= max_width:
+            current = candidate
+
+        else:
+
+            if current:
+                lines.append(current)
+
+            current = word
+
+    if current:
+        lines.append(current)
+
+    return lines
+
+
+def text_block(
+    draw,
+    text,
+    xy,
+    max_width,
+    max_height,
+    start_size=54,
+    color=WHITE,
+    bold=True,
+):
+
+    x, y = xy
+
+    for size in range(
+        start_size,
+        25,
+        -2,
+    ):
+
+        face = font(
             size,
             bold,
-            script="hi",
         )
 
-        english_font = load_font(
-            int(size * 0.88),
-            bold,
-            script="en",
+        lines = wrapped(
+            draw,
+            text,
+            face,
+            max_width,
         )
 
-        space_width = draw.textlength(
-            " ",
-            font=english_font,
+        step = int(
+            size * 1.48
         )
 
-        lines = []
-        line = []
-        used = 0.0
-        overflow = False
-
-        for word in text.split():
-            is_hindi = bool(
-                re.search(r"[\u0900-\u097f]", word)
-            )
-
-            font = (
-                hindi_font
-                if is_hindi
-                else english_font
-            )
-
-            word_width = draw.textlength(
-                word,
-                font=font,
-                language="hi" if is_hindi else "en",
-            )
-
-            if word_width > width:
-                overflow = True
-                break
-
-            extra = (
-                space_width
-                if line
-                else 0
-            ) + word_width
-
-            if line and used + extra > width:
-                lines.append((line, used))
-                line = []
-                used = 0.0
-
-            if line:
-                used += space_width
-
-            line.append(
-                (
-                    word,
-                    font,
-                    word_width,
-                    is_hindi,
-                )
-            )
-            used += word_width
-
-        if overflow:
-            continue
-
-        if line:
-            lines.append((line, used))
-
-        line_height = int(size * 1.42)
-
-        if (
-            len(lines) > max_lines
-            or len(lines) * line_height > y2 - y1
-        ):
-            continue
-
-        baseline = (
-            y1
-            + (y2 - y1 - len(lines) * line_height) / 2
-            + int(size * 1.05)
+        fits_height = (
+            len(lines) * step
+            <= max_height
         )
 
-        for words, line_width in lines:
-            x = (SIDE - line_width) / 2
+        fits_width = all(
+            draw.textbbox(
+                (0, 0),
+                line,
+                font=face,
+            )[2] <= max_width
+            for line in lines
+        )
 
-            for index, (
-                word,
-                font,
-                word_width,
-                is_hindi,
-            ) in enumerate(words):
+        if fits_height and fits_width:
 
-                if index:
-                    x += space_width
-
-                accent = (
-                    bool(re.search(r"\d", word))
-                    or word.strip("!?.।").upper()
-                    in {"BLUE", "COPPER"}
-                )
-
-                ink = (
-                    (255, 224, 35)
-                    if highlight and accent
-                    else color
-                )
+            for line in lines:
 
                 draw.text(
-                    (round(x), round(baseline)),
-                    word,
-                    font=font,
-                    anchor="ls",
-                    fill=ink,
-                    language=(
-                        "hi"
-                        if is_hindi
-                        else "en"
-                    ),
+                    (x, y),
+                    line,
+                    font=face,
+                    fill=color,
                 )
 
-                x += word_width
+                y += step
 
-            baseline += line_height
-
-        return
+            return y
 
     raise ValueError(
-        "Text could not fit inside the slide."
+        "Text too long for slide; "
+        "not publishing clipped text"
     )
 
 
-def design_slide(position, photo, copy):
-    """Create a 1080x1080 carousel image."""
+# ==========================================
+# FACTZAI SLIDE DESIGN
+# ==========================================
 
-    crop = ImageOps.fit(
-        photo,
-        (SIDE, Y_PANEL + 78),
-        method=Image.Resampling.LANCZOS,
-        centering=(
-            0.50 if position == 1 else 0.62,
-            0.47,
-        ),
-    )
+def base(
+    slide_no,
+    category,
+    date,
+):
 
-    crop = ImageEnhance.Contrast(crop).enhance(1.12)
-    crop = ImageEnhance.Color(crop).enhance(1.18)
-
-    slide = Image.new(
+    img = Image.new(
         "RGB",
-        (SIDE, SIDE),
-        (7, 7, 9),
-    )
-    slide.paste(crop, (0, 0))
-
-    shade = Image.new(
-        "RGBA",
-        (SIDE, SIDE),
-        (0, 0, 0, 0),
+        (SIZE, SIZE),
+        NAVY,
     )
 
-    shader = ImageDraw.Draw(shade)
+    d = ImageDraw.Draw(img)
 
-    for y in range(445, Y_PANEL + 100):
-        alpha = int(
-            255
-            * min(
-                1.0,
-                max(
-                    0,
-                    (y - 445)
-                    / (Y_PANEL + 75 - 445),
-                ),
-            )
-        )
+    # Yellow top border
 
-        shader.line(
-            (0, y, SIDE, y),
-            fill=(0, 0, 0, alpha),
-            width=1,
-        )
-
-    slide = Image.alpha_composite(
-        slide.convert("RGBA"),
-        shade,
-    ).convert("RGB")
-
-    draw = ImageDraw.Draw(slide)
-
-    yellow = (255, 224, 35)
-    white = (252, 252, 250)
-    cyan = (44, 209, 249)
-
-    draw.rounded_rectangle(
-        (905, 25, 1044, 92),
-        radius=32,
-        fill=(8, 10, 14),
+    d.rectangle(
+        (0, 0, SIZE, 18),
+        fill=YELLOW,
     )
 
-    draw.text(
-        (974, 61),
-        f"{position}/2",
-        font=load_font(
-            35,
-            True,
-            script="en",
-        ),
-        anchor="mm",
-        fill=white,
-    )
+    # Brand
 
-    if position == 1:
-        center_fit(
-            draw,
-            copy["hook"],
-            588,
-            678,
-            990,
-            67,
-            yellow,
-            2,
-        )
-
-        center_fit(
-            draw,
-            copy["fact"],
-            694,
-            918,
-            980,
-            76,
-            white,
-            3,
-            highlight=True,
-        )
-
-        bottom = "SWIPE  >>>"
-
-    else:
-        center_fit(
-            draw,
-            "और भी हैरानी की बात!",
-            584,
-            683,
-            1000,
-            57,
-            yellow,
-            2,
-        )
-
-        center_fit(
-            draw,
-            copy["explanation"],
-            687,
-            918,
-            990,
-            58,
-            white,
-            4,
-            highlight=True,
-        )
-
-        bottom = "SOURCE IN CAPTION"
-
-    draw.rounded_rectangle(
-        (392, 934, 688, 942),
-        radius=4,
-        fill=yellow,
-    )
-
-    draw.text(
-        (66, 1023),
+    d.text(
+        (65, 48),
         BRAND,
-        font=load_font(
-            24,
-            True,
-            script="en",
-        ),
-        anchor="lm",
-        fill=(200, 200, 200),
+        font=font(72, True),
+        fill=YELLOW,
     )
 
-    draw.text(
-        (1015, 1023),
-        bottom,
-        font=load_font(
-            24,
-            True,
-            script="en",
-        ),
-        anchor="rm",
-        fill=cyan,
+    d.text(
+        (70, 150),
+        "LATEST NEWS  /  "
+        + str(slide_no).zfill(2),
+        font=font(29, True),
+        fill=WHITE,
     )
 
-    OUTPUT.mkdir(
+    # Category box
+
+    d.rounded_rectangle(
+        (65, 215, 1015, 285),
+        radius=16,
+        fill=(25, 36, 57),
+    )
+
+    d.text(
+        (88, 225),
+        clean(category).upper()[:34],
+        font=font(32, True),
+        fill=YELLOW,
+    )
+
+    # Bottom border
+
+    d.line(
+        (65, 978, 1015, 978),
+        fill=YELLOW,
+        width=3,
+    )
+
+    d.text(
+        (65, 998),
+        date + "  •  AI-assisted news summary",
+        font=font(23),
+        fill=MUTED,
+    )
+
+    d.text(
+        (890, 998),
+        "@fac.tzai",
+        font=font(23, True),
+        fill=YELLOW,
+    )
+
+    return img, d
+
+
+# ==========================================
+# MAIN NEWS GENERATOR
+# ==========================================
+
+def main():
+
+    story_file = (
+        ROOT / "latest_news.json"
+    )
+
+    if not story_file.is_file():
+        raise RuntimeError(
+            "latest_news.json missing. "
+            "Run news_bot.py first."
+        )
+
+    story = json.loads(
+        story_file.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    required_fields = (
+        "id",
+        "title",
+        "url",
+        "source",
+        "published_utc",
+        "category",
+    )
+
+    for key in required_fields:
+
+        if not clean(story.get(key)):
+            raise RuntimeError(
+                "News metadata missing: "
+                + key
+            )
+
+    date = datetime.fromisoformat(
+        story["published_utc"]
+    ).strftime("%d %b %Y")
+
+    # Gemini news content
+
+    copy = ai_copy(story)
+
+    OUT.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    destination = OUTPUT / f"slide_{position}.jpg"
+    # ======================================
+    # SLIDE 1 - HEADLINE
+    # ======================================
 
-    slide.save(
-        destination,
-        format="JPEG",
+    first, d1 = base(
+        1,
+        story["category"],
+        date,
+    )
+
+    d1.text(
+        (65, 327),
+        "आज की बड़ी खबर",
+        font=font(40, True),
+        fill=YELLOW,
+    )
+
+    text_block(
+        d1,
+        copy["headline"],
+        (65, 415),
+        950,
+        380,
+        68,
+    )
+
+    d1.rounded_rectangle(
+        (65, 835, 1015, 928),
+        radius=22,
+        fill=YELLOW,
+    )
+
+    d1.text(
+        (95, 852),
+        "SWIPE  →  पूरी जानकारी",
+        font=font(35, True),
+        fill=NAVY,
+    )
+
+    # ======================================
+    # SLIDE 2 - NEWS DETAILS
+    # ======================================
+
+    second, d2 = base(
+        2,
+        story["category"],
+        date,
+    )
+
+    d2.text(
+        (65, 325),
+        "क्या पता चला?",
+        font=font(45, True),
+        fill=YELLOW,
+    )
+
+    y = text_block(
+        d2,
+        "01  " + copy["point1"],
+        (65, 415),
+        945,
+        200,
+        43,
+    )
+
+    text_block(
+        d2,
+        "02  " + copy["point2"],
+        (
+            65,
+            max(y + 42, 640),
+        ),
+        945,
+        190,
+        40,
+    )
+
+    d2.text(
+        (65, 890),
+        "SOURCE: "
+        + clean(story["source"])[:38],
+        font=font(28, True),
+        fill=YELLOW,
+    )
+
+    d2.text(
+        (65, 934),
+        "Original report link in caption",
+        font=font(24),
+        fill=MUTED,
+    )
+
+    # ======================================
+    # SAVE INSTAGRAM SLIDES
+    # ======================================
+
+    first.save(
+        OUT / "slide_1.jpg",
         quality=93,
-        optimize=True,
         subsampling=0,
     )
 
-    return destination
-
-
-def main():
-    """Generate a complete carousel with automatic retries."""
-
-    print("Starting Instagram carousel generation.")
-
-    api_key = os.getenv(
-        "GEMINI_API_KEY",
-        "",
-    ).strip()
-
-    if not api_key:
-        raise RuntimeError(
-            "GEMINI_API_KEY secret is missing."
-        )
-
-    client = genai.Client(api_key=api_key)
-
-    OUTPUT.mkdir(
-        parents=True,
-        exist_ok=True,
+    second.save(
+        OUT / "slide_2.jpg",
+        quality=93,
+        subsampling=0,
     )
 
-    excluded_topics = set()
-    last_error = None
+    # ======================================
+    # INSTAGRAM CAPTION
+    # ======================================
 
-    for source_attempt in range(
-        1,
-        MAX_SOURCE_ATTEMPTS + 1,
-    ):
-        print(
-            f"Source attempt "
-            f"{source_attempt}/{MAX_SOURCE_ATTEMPTS}"
-        )
+    caption = (
+        copy["caption"]
+        + "\n\n"
+        + "📰 Source: "
+        + story["source"]
+        + "\n"
+        + "📅 Published: "
+        + date
+        + "\n"
+        + "🔗 "
+        + story["url"]
+        + "\n\n"
+        + "AI-assisted summary based on "
+        + "a news headline; see original "
+        + "report for details."
+        + "\n\n"
+        + "#FACTZAI #LatestNews #NewsUpdate"
+    )
 
-        try:
-            (
-                topic,
-                excerpt,
-                source,
-                image_urls,
-                topic_key,
-            ) = get_verified_source(
-                excluded_topics
-            )
+    (
+        OUT / "caption.txt"
+    ).write_text(
+        caption,
+        encoding="utf-8",
+    )
 
-            excluded_topics.add(topic_key)
+    (
+        OUT / "news_id.txt"
+    ).write_text(
+        story["id"],
+        encoding="utf-8",
+    )
 
-            print("Selected topic:", topic)
-
-            photo, image_url = download_photo(
-                image_urls
-            )
-
-            copy = generate_mixed_copy(
-                topic,
-                excerpt,
-                source,
-                client,
-            )
-
-            first = design_slide(
-                1,
-                photo,
-                copy,
-            )
-
-            second = design_slide(
-                2,
-                photo,
-                copy,
-            )
-
-            caption = (
-                f"{copy['caption']}\n\n"
-                f"Source: {source}\n"
-                "Image source (check license/attribution): "
-                f"{image_url}\n\n"
-                "#AmazingFacts #HindiFacts "
-                "#Knowledge #Facts"
-            )
-
-            (OUTPUT / "caption.txt").write_text(
-                caption,
-                encoding="utf-8",
-            )
-
-            (
-                OUTPUT / "source_excerpt.txt"
-            ).write_text(
-                f"TOPIC: {topic}\n"
-                f"SOURCE: {source}\n"
-                f"IMAGE: {image_url}\n\n"
-                f"{excerpt}\n",
-                encoding="utf-8",
-            )
-
-            print(
-                "SUCCESS:",
-                first.name,
-                second.name,
-                "1080x1080",
-            )
-
-            print(
-                "Caption generated successfully."
-            )
-
-            return
-
-        except Exception as exc:
-            last_error = exc
-
-            print(
-                "Generation attempt failed:",
-                type(exc).__name__,
-                str(exc)[:250],
-            )
-
-            if source_attempt < MAX_SOURCE_ATTEMPTS:
-                time.sleep(3)
-
-    raise RuntimeError(
-        "Carousel generation failed after retries. "
-        f"Last error: {type(last_error).__name__}: "
-        f"{str(last_error)[:200]}"
+    print(
+        "FACTZAI news carousel generated:",
+        story["title"],
     )
 
 
