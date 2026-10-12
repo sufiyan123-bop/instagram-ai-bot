@@ -27,24 +27,42 @@ concurrency:
 
 jobs:
   create-and-publish:
+    # cron-job.org triggers workflow_dispatch.
+    # GitHub schedule events remain disabled here.
     if: ${{ github.event_name == 'workflow_dispatch' }}
 
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
+      # =====================================
+      # 1. CHECKOUT
+      # =====================================
+
       - name: Check out source
         uses: actions/checkout@v4
         with:
           persist-credentials: true
+
+      # =====================================
+      # 2. PYTHON
+      # =====================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # =====================================
+      # 3. INSTALL DEPENDENCIES
+      # =====================================
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
+
+      # =====================================
+      # 4. CHECK INSTAGRAM QUOTA
+      # =====================================
 
       - name: Verify Instagram quota
         id: quota_before
@@ -54,15 +72,27 @@ jobs:
           CHECK_SCHEDULE_HOURS: 'false'
         run: python check_quota.py
 
+      # =====================================
+      # 5. FETCH LATEST 24-HOUR NEWS
+      # =====================================
+
       - name: Fetch latest FACTZAI news
         if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
         run: python news_bot.py
+
+      # =====================================
+      # 6. GENERATE FACTZAI NEWS SLIDES
+      # =====================================
 
       - name: Generate FACTZAI Instagram slides
         if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python bot.py
+
+      # =====================================
+      # 7. SAVE PREVIEW
+      # =====================================
 
       - name: Save preview images
         if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
@@ -74,6 +104,10 @@ jobs:
             latest_news.json
           retention-days: 2
 
+      # =====================================
+      # 8. HOST IMAGES ON GITHUB
+      # =====================================
+
       - name: Host images in GitHub
         if: ${{ steps.quota_before.outputs.allowed == 'true' }}
         shell: bash
@@ -81,6 +115,7 @@ jobs:
           set -euo pipefail
 
           folder="posts/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
           mkdir -p "$folder"
 
           cp output/slide_1.jpg "$folder/slide_1.jpg"
@@ -93,18 +128,24 @@ jobs:
               commit -m "Add FACTZAI news slides ${GITHUB_RUN_ID}"
 
           for attempt in 1 2 3; do
+
             git pull --rebase origin "$GITHUB_REF_NAME"
 
             if git push origin "HEAD:$GITHUB_REF_NAME"; then
-              echo "Public image commit ready"
+              echo "Public images ready"
               exit 0
             fi
 
             sleep 3
+
           done
 
           echo "Could not push images" >&2
           exit 1
+
+      # =====================================
+      # 9. RECHECK INSTAGRAM QUOTA
+      # =====================================
 
       - name: Recheck Instagram quota
         id: quota_final
@@ -114,9 +155,48 @@ jobs:
           CHECK_SCHEDULE_HOURS: 'false'
         run: python check_quota.py
 
+      # =====================================
+      # 10. PUBLISH INSTAGRAM CAROUSEL
+      # =====================================
+
       - name: Publish Instagram carousel
+        id: publish
         if: ${{ steps.quota_final.outputs.allowed == 'true' }}
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           PUBLIC_BASE: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/posts/${{ github.run_id }}-${{ github.run_attempt }}
         run: python publish_ig.py
+
+      # =====================================
+      # 11. SAVE PUBLISHED NEWS HISTORY
+      # =====================================
+
+      - name: Save successfully published news
+        if: ${{ steps.publish.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python save_news_history.py
+
+          git add posted_news.json
+
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "Record published FACTZAI news"
+
+          for attempt in 1 2 3; do
+
+            git pull --rebase origin "$GITHUB_REF_NAME"
+
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "News history saved successfully"
+              exit 0
+            fi
+
+            sleep 3
+
+          done
+
+          echo "Could not save news history" >&2
+          exit 1
