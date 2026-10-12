@@ -1,0 +1,29 @@
+name: FACTZAI News Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-news:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install requests
+        run: pip install requests
+
+      - name: Fetch latest news
+        run: python news_bot.py
+
+      - name: Save news result
+        uses: actions/upload-artifact@v4
+        with:
+          name: factzai-latest-news
+          path: latest_news.json
