@@ -1,151 +1,86 @@
-name: Instagram Auto Post - Daily 50
+name: YouTube Automation Promo Instagram Publisher
 
 on:
   workflow_dispatch:
     inputs:
       publish_now:
-        description: 'Publish a real Instagram carousel?'
+        description: 'Publish to Instagram now?'
         required: true
         type: choice
         default: 'no'
         options:
           - 'no'
           - 'yes'
-
   schedule:
-    - cron: '41,59 1,4,7,10,13 * * *'
-    - cron: '17,35,53 2,5,8,11,14 * * *'
-    - cron: '5,23,41,59 3,6,9,12,15 * * *'
-    - cron: '47 1,4,7,10,13 * * *'
+    # 19:00 IST each day (GitHub cron can be delayed)
+    - cron: '30 13 * * *'
 
 permissions:
   contents: write
 
 concurrency:
-  group: instagram-publisher
+  group: youtube-promo-publisher
   cancel-in-progress: false
 
 jobs:
-  create-and-publish:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+  prepare-and-post:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 15
     steps:
-      - name: Check out source
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           persist-credentials: true
 
-      - name: Set up Python
+      - name: Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Install requirements
+        run: pip install pillow requests
 
-      - name: Verify Instagram quota
-        id: quota_before
-        if: ${{ inputs.publish_now == 'yes' }}
-        env:
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          CHECK_SCHEDULE_HOURS: 'false'
-        run: python check_quota.py
+      - name: Prepare numbered promotional image and caption
+        run: python promo_generator.py
 
-      - name: Fetch latest FACTZAI news
-        if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
-        run: python news_bot.py
-
-      - name: Generate FACTZAI Instagram slides
-        if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ENABLE_AI_IMAGE: ${{ vars.ENABLE_AI_IMAGE || 'true' }}
-          GEMINI_IMAGE_MODEL: ${{ vars.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image' }}
-        run: python bot.py
-
-      - name: Save preview images
-        if: ${{ inputs.publish_now == 'no' || steps.quota_before.outputs.allowed == 'true' }}
+      - name: Upload preview
         uses: actions/upload-artifact@v4
         with:
-          name: instagram-preview
-          path: |
-            output/
-            latest_news.json
-          retention-days: 2
+          name: youtube-promo-preview
+          path: output/
+          retention-days: 3
 
-      - name: Host images in GitHub
-        if: ${{ steps.quota_before.outputs.allowed == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          folder="posts/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$folder"
-
-          cp output/slide_1.jpg "$folder/slide_1.jpg"
-          cp output/slide_2.jpg "$folder/slide_2.jpg"
-
-          git add "$folder"
-
-          git -c user.name='github-actions[bot]' \
-              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m "Add FACTZAI news slides ${GITHUB_RUN_ID}"
-
-          for attempt in 1 2 3; do
-            git pull --rebase origin "$GITHUB_REF_NAME"
-
-            if git push origin "HEAD:$GITHUB_REF_NAME"; then
-              echo "Public images ready"
-              exit 0
-            fi
-
-            sleep 3
-          done
-
-          echo "Could not push images" >&2
-          exit 1
-
-      - name: Recheck Instagram quota
-        id: quota_final
-        if: ${{ steps.quota_before.outputs.allowed == 'true' }}
+      - name: Check Instagram quota
+        if: ${{ github.event_name == 'schedule' || inputs.publish_now == 'yes' }}
+        id: quota
         env:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           CHECK_SCHEDULE_HOURS: 'false'
         run: python check_quota.py
 
-      - name: Publish Instagram carousel
-        id: publish
-        if: ${{ steps.quota_final.outputs.allowed == 'true' }}
-        env:
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          PUBLIC_BASE: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/posts/${{ github.run_id }}-${{ github.run_attempt }}
-        run: python publish_ig.py
-
-      - name: Save successfully published news
-        if: ${{ steps.publish.outcome == 'success' }}
-        shell: bash
+      - name: Host numbered image in public GitHub repository
+        if: ${{ steps.quota.outputs.allowed == 'true' }}
         run: |
           set -euo pipefail
+          folder="posts/promo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$folder"
+          cp output/promo_post.jpg "$folder/promo_post.jpg"
+          git add "$folder/promo_post.jpg"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Host numbered YouTube promo image"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
 
-          python save_news_history.py
-          git add posted_news.json
+      - name: Publish photo on Instagram
+        if: ${{ steps.quota.outputs.allowed == 'true' }}
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          PUBLIC_IMAGE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/posts/promo-${{ github.run_id }}-${{ github.run_attempt }}/promo_post.jpg
+        run: python publish_promo.py
 
-          git -c user.name='github-actions[bot]' \
-              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-              commit -m "Record published FACTZAI news"
-
-          for attempt in 1 2 3; do
-            git pull --rebase origin "$GITHUB_REF_NAME"
-
-            if git push origin "HEAD:$GITHUB_REF_NAME"; then
-              echo "News history saved successfully"
-              exit 0
-            fi
-
-            sleep 3
-          done
-
-          echo "Could not save news history" >&2
-          exit 1
+      - name: Advance counter only after confirmed publish
+        if: ${{ steps.quota.outputs.allowed == 'true' && success() }}
+        run: |
+          set -euo pipefail
+          cp output/post_number.txt post_counter.txt
+          git add post_counter.txt
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Advance published promo post number"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
