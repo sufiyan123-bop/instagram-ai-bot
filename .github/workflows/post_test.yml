@@ -58,6 +58,19 @@ jobs:
           CHECK_SCHEDULE_HOURS: 'false'
         run: python check_quota.py
 
+      - name: Explain why Instagram publishing was skipped
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_now != 'yes') || steps.quota.outputs.allowed != 'true' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.publish_now }}" != "yes" ]; then
+            echo "::warning::Preview only: publish_now was NO. Choose YES for a real Instagram post."
+            echo "### Preview only — no Instagram post was attempted" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Instagram publishing was blocked by the quota/authentication check. Inspect the Check Instagram quota step. Confirm IG_ACCESS_TOKEN is configured and valid."
+            echo "### Instagram publishing blocked" >> "$GITHUB_STEP_SUMMARY"
+            echo "Check the quota/authentication step. The run is intentionally marked failed so a green tick never falsely implies a successful post." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       - name: Host numbered image in public GitHub repository
         if: ${{ steps.quota.outputs.allowed == 'true' }}
         run: |
