@@ -7,7 +7,7 @@ on:
         description: 'Publish to Instagram now?'
         required: true
         type: choice
-        default: 'no'
+        default: 'yes'
         options:
           - 'no'
           - 'yes'
@@ -101,4 +101,10 @@ jobs:
           cp output/post_number.txt post_counter.txt
           git add post_counter.txt
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Advance published promo post number"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+            sleep 3
+          done
+          exit 1
+
