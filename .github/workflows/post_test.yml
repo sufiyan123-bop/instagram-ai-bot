@@ -12,8 +12,8 @@ on:
           - 'no'
           - 'yes'
   schedule:
-    # 19:00 IST each day (GitHub cron can be delayed)
-    - cron: '30 13 * * *'
+    # 07:00, 10:00, 13:00, 16:00, 19:00, 22:00 IST (best effort)
+    - cron: '30 1,4,7,10,13,16 * * *'
 
 permissions:
   contents: write
@@ -67,7 +67,12 @@ jobs:
           cp output/promo_post.jpg "$folder/promo_post.jpg"
           git add "$folder/promo_post.jpg"
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m "Host numbered YouTube promo image"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME"
+            if git push origin "HEAD:$GITHUB_REF_NAME"; then exit 0; fi
+            sleep 3
+          done
+          exit 1
 
       - name: Publish photo on Instagram
         if: ${{ steps.quota.outputs.allowed == 'true' }}
