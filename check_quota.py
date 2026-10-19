@@ -31,8 +31,19 @@ def get_json(path: str, params: dict[str, str]) -> dict:
         params=params,
         timeout=30,
     )
-    response.raise_for_status()
-    return response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise ValueError(f"Instagram returned non-JSON HTTP {response.status_code}")
+    if not response.ok or data.get("error"):
+        err = data.get("error") or {}
+        # Never include tokens, request URLs or raw response bodies in logs.
+        raise ValueError(
+            f"Instagram HTTP {response.status_code}, code={err.get('code', '?')}, "
+            f"type={err.get('type', '?')}, subcode={err.get('error_subcode', '?')}: "
+            f"{str(err.get('message', 'API request failed'))[:240]}"
+        )
+    return data
 
 
 def main() -> None:
@@ -64,12 +75,12 @@ def main() -> None:
         used = int(limit["quota_usage"])
         config = limit["config"]
         total = int(config["quota_total"])
-        duration = int(config["quota_duration"])
+        duration = int(config.get("quota_duration", 86400))
         if used < 0 or total < 1 or duration != 86400:
             raise ValueError("Unexpected API quota fields")
     except (requests.RequestException, ValueError, KeyError, TypeError, IndexError) as exc:
         # Never log raw API response/headers; they could reveal sensitive details.
-        set_allowed(False, f"Could not verify quota ({type(exc).__name__})")
+        set_allowed(False, f"Could not verify quota: {type(exc).__name__}: {str(exc)[:300]}")
         return
 
     cap = min(total, MAX_POSTS_PER_24_HOURS)
