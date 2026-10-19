@@ -1,13 +1,7 @@
-name: Automatic Schedule Test
+name: Manual Schedule Diagnostic (Old Schedule Disabled)
 
 on:
   workflow_dispatch:
-    schedule:
-    - cron: '41,59 1 * * *'
-    - cron: '17,35,53 2,5,8,11,14 * * *'
-    - cron: '11,29,47 3,6,9,12,15 * * *'
-    - cron: '5,23,41,59 4,7,10,13 * * *'
-    - cron: '5,23 16 * * *'
 
 permissions:
   contents: read
@@ -16,8 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Check automatic trigger
+      - name: Display workflow trigger
         run: |
-          echo "GitHub automatic scheduler is working!"
-          echo "Event: ${{ github.event_name }}"
+          echo "Manual diagnostic only; old frequent FACTZAI schedule disabled"
           date -u
