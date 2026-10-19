@@ -8,7 +8,7 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent
-ASSET = ROOT / "assets" / "youtube_automation_promo.png"
+ASSETS = [ROOT / "assets" / "youtube_automation_promo.png", ROOT / "assets" / "youtube_automation_promo.jpg", ROOT / "assets" / "youtube_automation_promo.jpeg"]
 OUTPUT = ROOT / "output"
 COUNTER = ROOT / "post_counter.txt"
 
@@ -40,7 +40,8 @@ def get_font(size):
     return ImageFont.load_default()
 
 def main():
-    if not ASSET.exists():
+    asset = next((path for path in ASSETS if path.is_file()), None)
+    if asset is None:
         raise RuntimeError(
             "Missing promotional image. Upload the provided YouTube Automation image "
             "as assets/youtube_automation_promo.png in GitHub."
@@ -50,7 +51,9 @@ def main():
         previous = int(COUNTER.read_text(encoding="utf-8").strip())
     number = previous + 1
 
-    canvas = Image.open(ASSET).convert("RGB")
+    canvas = Image.open(asset).convert("RGB")
+    if min(canvas.size) < 320:
+        raise RuntimeError("Promotional image is too small (minimum 320px on each side).")
     w, h = canvas.size
     draw = ImageDraw.Draw(canvas)
     label = f"POST {number}"
