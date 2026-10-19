@@ -8,7 +8,7 @@ This repository's active publishing workflow is **YouTube Automation Promo Insta
 2. On GitHub, open this repository and upload that *exact image* at `assets/youtube_automation_promo.png` (or `.jpg` / `.jpeg`) (create `assets/` when prompted). Commit the file on `main`.
 3. In GitHub repository **Settings → Secrets and variables → Actions**, make sure `IG_ACCESS_TOKEN` is present and is a valid Instagram Professional account publishing token. **Never put it in source code.**
 4. Go to **Actions → YouTube Automation Promo Instagram Publisher → Run workflow**. Choose **no** to only generate preview (download artifact `youtube-promo-preview`).
-5. Check the image/caption. To make **one real post**, run workflow again and choose **yes**.
+5. Check the image/caption. To make **one real post**, run workflow again and choose **yes** (the default). If posting is blocked, the workflow reports a failure and an actionable error.
 6. The schedule is **07:00, 10:00, 13:00, 16:00, 19:00 and 22:00 IST** (6 posts/day). GitHub Actions cron is best-effort, not exact. To stop, disable the workflow in the GitHub Actions UI.
 
 ## What it does
