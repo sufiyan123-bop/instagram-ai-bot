@@ -12,21 +12,46 @@ ASSETS = [ROOT / "assets" / "youtube_automation_promo.png", ROOT / "assets" / "y
 OUTPUT = ROOT / "output"
 COUNTER = ROOT / "post_counter.txt"
 
-CAPTION = """🚀 YOUTUBE AUTOMATION — ₹100 / MONTH!
+CAPTION = """🚀 COMPUTER COURSES – 100% FREE! 🎓
 
-Ek baar apna niche aur posting time set karo. Hamara automation workflow:
-✅ Niche-wise script banane ka system
-✅ Automatic voice generation
-✅ Animated YouTube Shorts creation
-✅ YouTube par upload aur scheduled publishing
-✅ Mobile-friendly setup
+🔥 अब सीखना हुआ और भी आसान!
 
-🎯 Setup instructions, real demo aur availability updates ke liye WhatsApp Channel JOIN KARO!
-📲 WhatsApp Channel link: BIO MEIN
+क्या आप Computer Skills सीखना चाहते हैं, लेकिन महंगे Courses खरीदने के पैसे नहीं हैं? 😍
 
-⚠️ Project development / testing mein hai. Final features aur service launch demo ke baad confirm honge.
+तो आपके लिए खुशखबरी है! ❤️
 
-#YouTubeAutomation #YouTubeShorts #AIShorts #YouTubeTools #ContentAutomation
+💻 अब पाएं Computer के ढेरों Courses बिल्कुल FREE में!
+
+📚 यहाँ आपको मिलेंगे:
+
+✅ Basic Computer Course
+✅ Advanced Computer Course
+✅ MS Word, Excel & PowerPoint
+✅ Graphic Designing
+✅ Web Development
+✅ Programming & Coding
+✅ Tally & Accounting
+✅ Digital Marketing
+✅ Video Editing
+✅ Cyber Security
+✅ और भी बहुत कुछ! 🔥
+
+🎯 हमारा मकसद: हर किसी तक Quality Education पहुँचाना, वो भी बिल्कुल FREE में!
+
+💯 No Course Fees
+📚 Learn New Skills
+🚀 Improve Your Knowledge
+🎓 Build Your Future
+
+👇 JOIN OUR TELEGRAM CHANNEL NOW!
+
+🔗 Telegram: [अपना Telegram Link यहाँ डालें]
+
+❤️ सीखना शुरू करो, आगे बढ़ना शुरू करो!
+
+📢 इस पोस्ट को अपने दोस्तों के साथ भी SHARE करें!
+
+#FreeCourses #ComputerCourses #FreeEducation #LearnSkills #OnlineLearning #ComputerEducation
 """
 
 def get_font(size):
